@@ -6,6 +6,7 @@ export type SettingsRootTab =
   | "projects"
   | "workspaces"
   | "providers"
+  | "quotas"
   | "models"
   | "extensions"
   | "memory"
@@ -27,6 +28,7 @@ export type SettingsServerTab =
   | "projects"
   | "workspaces"
   | "providers"
+  | "quotas"
   | "models"
   | "extensions"
   | "memory"
@@ -66,6 +68,7 @@ const rootTabs: Record<SettingsRootTab, true> = {
   projects: true,
   workspaces: true,
   providers: true,
+  quotas: true,
   models: true,
   extensions: true,
   memory: true,

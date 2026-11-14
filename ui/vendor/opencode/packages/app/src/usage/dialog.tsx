@@ -9,6 +9,8 @@ import { useLanguage } from "@/runtime/i18n/language"
 import { usePlatform } from "@/runtime/platform/platform"
 import { useData } from "@/runtime/server/current"
 import { useUsageFormat } from "./format"
+import { useQuotasData, quotasData, formatCurrencyValue, formatCompactNumber, statusLabelKey, type ProviderQuotaEntry } from "@/settings/quotas/api"
+import { useSettingsDialog } from "@/settings/command"
 import {
   type BudgetLabel,
   type BudgetNote,
@@ -43,6 +45,34 @@ export function DialogUsage(props: {
   }
   onMount(load)
   const info = () => data.location.usage.limits(props.location)
+  const dialog = useDialog()
+  const openQuotas = useSettingsDialog("quotas")
+  // The dialog never polls: it shows whatever the settings tab already cached, so opening it is
+  // free and a closed dialog costs no requests (docs/24-ui-performance.md).
+  const quotas = useQuotasData({ enabled: () => false })
+
+  const quotaHeadline = (entry: ProviderQuotaEntry) => {
+    const win = entry.windows?.[0]
+    if (win) {
+      if (typeof win.usedPercent === "number") {
+        return language.t("usage.go.used", { percent: Math.round(win.usedPercent) })
+      }
+      if (typeof win.remainingPercent === "number") return `${Math.round(win.remainingPercent)}%`
+      if (typeof win.remaining === "number") return `${formatCompactNumber(win.remaining, language.intl())} ${win.unit}`
+    }
+    const bal = entry.balances?.[0]
+    if (bal && typeof bal.remaining === "number") {
+      return formatCurrencyValue(bal.remaining, bal.currency, language.intl())
+    }
+    if (entry.rateLimit && typeof entry.rateLimit.requestsRemaining === "number") {
+      return `${entry.rateLimit.requestsRemaining}/${entry.rateLimit.requestsLimit ?? "?"} req`
+    }
+    if (entry.localUsage) {
+      return `${formatCurrencyValue(entry.localUsage.fiveHours.costUsd, "USD", language.intl())} (5h)`
+    }
+    // Never the raw server token: an unknown status still reads as localized text.
+    return language.t(statusLabelKey(entry.status))
+  }
 
   return (
     <Switch>
@@ -57,14 +87,57 @@ export function DialogUsage(props: {
         )}
       </Match>
       <Match when={true}>
-        <UsageFrame>
-          <div class="flex min-h-[120px] items-center justify-center px-4 pb-4">
-            <Switch>
-              <Match when={state.loading}>
+        <UsageFrame
+          footer={
+            <div class="flex w-full items-center justify-end">
+              <Button
+                variant="neutral"
+                onClick={() => {
+                  dialog.close()
+                  openQuotas()
+                }}
+              >
+                {language.t("usage.quotas.openSettings")}
+              </Button>
+            </div>
+          }
+        >
+          <Show
+            when={!state.loading || quotas.query.data}
+            fallback={
+              <div class="flex min-h-[120px] items-center justify-center px-4 pb-4">
                 <Loader />
-              </Match>
-              <Match when={state.failed}>
-                <div class="flex flex-col items-center gap-3">
+              </div>
+            }
+          >
+            <Show when={quotasData(quotas.query.data)?.providers.length}>
+              <Section label={language.t("usage.quotas.title")}>
+                <Panel>
+                  <For each={quotasData(quotas.query.data)?.providers.slice(0, 6) ?? []}>
+                    {(entry, index) => (
+                      <>
+                        <Show when={index() > 0}>
+                          <Divider />
+                        </Show>
+                        <Item>
+                          <div class="flex items-center justify-between gap-3 self-stretch">
+                            <Line class="font-[530] text-v2-text-text-base">{entry.name}</Line>
+                            <span class="text-[13px] leading-text-compact font-[440] text-v2-text-text-muted">
+                              {quotaHeadline(entry)}
+                            </span>
+                          </div>
+                        </Item>
+                      </>
+                    )}
+                  </For>
+                </Panel>
+              </Section>
+            </Show>
+
+            <Show
+              when={!state.failed}
+              fallback={
+                <div class="flex flex-col items-center gap-3 px-4 py-2">
                   <span class="text-[13px] leading-text-compact font-[440] tracking-[-0.04px] text-v2-text-text-muted">
                     {language.t("usage.error")}
                   </span>
@@ -72,17 +145,16 @@ export function DialogUsage(props: {
                     {language.t("usage.retry")}
                   </Button>
                 </div>
-              </Match>
-              <Match when={true}>
-                <Panel gap={8}>
-                  <Item>
-                    <Line class="font-[530] text-v2-text-text-base">{language.t("usage.signedOut.title")}</Line>
-                    <Line class="text-v2-text-text-muted">{language.t("usage.signedOut.body")}</Line>
-                  </Item>
-                </Panel>
-              </Match>
-            </Switch>
-          </div>
+              }
+            >
+              <Panel gap={8}>
+                <Item>
+                  <Line class="font-[530] text-v2-text-text-base">{language.t("usage.signedOut.title")}</Line>
+                  <Line class="text-v2-text-text-muted">{language.t("usage.signedOut.body")}</Line>
+                </Item>
+              </Panel>
+            </Show>
+          </Show>
         </UsageFrame>
       </Match>
     </Switch>

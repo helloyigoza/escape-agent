@@ -77,7 +77,7 @@ pub fn build_for_state(
     client: Arc<SharedLlmClient>,
 ) -> Option<ObserverHandle> {
     let observer_config = parse_observer_config(config)?;
-    let model = resolve_model(config, catalog, &observer_config)?;
+    let model = resolve_model(config, catalog, &client, &observer_config)?;
     let (executor, repairs) = RepairChannel::new();
     let directory = state.directory().to_string_lossy().into_owned();
     let notifier = Arc::new(BusObserverNotifier::new(
@@ -128,28 +128,45 @@ fn parse_goal_config(config: &ConfigService) -> GoalConfig {
         .unwrap_or_default()
 }
 
+/// Pick the first usable model reference and resolve it.
+///
+/// The chain mirrors `oc-cli`'s digest resolution and doc 08: `observer.model`,
+/// then `observer.digest_model`, then `subagents.digest_model`, then the root
+/// `model`. Each candidate is trimmed and an empty (or whitespace-only) value is
+/// skipped, because the settings UI writes `""`/`null` when a field is cleared.
+///
+/// Resolution goes through [`SharedLlmClient::resolve_model`] rather than
+/// [`Catalog::resolve`]: an attached transport hook (for example the Antigravity
+/// gateway) owns models that the startup catalog snapshot does not contain, and
+/// resolving through the client keeps such a model usable as the observer judge.
 fn resolve_model(
     config: &ConfigService,
     catalog: &Catalog,
+    client: &SharedLlmClient,
     observer: &ObserverConfig,
 ) -> Option<ResolvedModel> {
-    let reference = observer
-        .model
-        .clone()
-        .or_else(|| observer.digest_model.clone())
-        .or_else(|| {
-            config
-                .merged()
-                .get("subagents")
-                .and_then(|subagents| subagents.get("digest_model"))
-                .and_then(Value::as_str)
-                .map(str::to_owned)
-        });
+    let subagents_digest = config
+        .merged()
+        .get("subagents")
+        .and_then(|subagents| subagents.get("digest_model"))
+        .and_then(Value::as_str);
+    let root_model = config.model();
+    let reference = [
+        observer.model.as_deref(),
+        observer.digest_model.as_deref(),
+        subagents_digest,
+        root_model.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    .map(str::trim)
+    .find(|candidate| !candidate.is_empty())
+    .map(str::to_owned);
     let Some(reference) = reference else {
         tracing::info!("observer disabled: no model");
         return None;
     };
-    let model = match catalog.resolve(&reference) {
+    let model = match client.resolve_model(catalog, &reference) {
         Ok(model) => model,
         Err(error) => {
             tracing::warn!(

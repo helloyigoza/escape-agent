@@ -1,4 +1,5 @@
 use axum::http::{Method, StatusCode};
+use oc_server::data::session_ext::SECRET_KEYS;
 use oc_server::router;
 use oc_store::NewMessage;
 use oc_types::now_millis;
@@ -7,22 +8,6 @@ use serde_json::{Value, json};
 use crate::support::{
     call, create_session, harness, message_ids, message_list, prompt, session_id,
 };
-
-const SECRET_KEYS: [&str; 13] = [
-    "authorization",
-    "apikey",
-    "api_key",
-    "api-key",
-    "token",
-    "access_token",
-    "refresh_token",
-    "secret",
-    "client_secret",
-    "password",
-    "credential",
-    "credentials",
-    "private_key",
-];
 
 /// Asserts that no credential-bearing key survives at any depth of `value`.
 fn assert_no_secret_keys(value: &Value) {
@@ -144,7 +129,16 @@ async fn sanitize_strips_nested_secret_keys_without_mutating_the_store() {
             "title": "secrets",
             "metadata": {
                 "apiKey": "sk-live",
-                "nested": {"authorization": "Bearer x", "keep": 1},
+                "nested": {
+                    "authorization": "Bearer x",
+                    "managementKey": "sk-or-mgmt",
+                    "management_key": "sk-or-mgmt-2",
+                    "bearer": "tok-b",
+                    "x-api-key": "xak-1",
+                    "access": "ya29.acc",
+                    "refresh": "1//ref",
+                    "keep": 1
+                },
                 "list": [{"token": "t", "ok": 2}],
             },
         }),
@@ -159,11 +153,19 @@ async fn sanitize_strips_nested_secret_keys_without_mutating_the_store() {
             id: "msg_secret_user".to_owned(),
             session_id: sid.clone(),
             kind: "user".to_owned(),
-            data: json!({"text": "hi", "apiKey": "sk-msg", "private_key": "pem"}),
+            data: json!({
+                "text": "hi",
+                "apiKey": "sk-msg",
+                "private_key": "pem",
+                "managementKey": "sk-msg-mgmt",
+                "x-api-key": "xak-msg"
+            }),
             time_created: now_millis(),
         })
         .await
         .unwrap();
+
+    assert_secret_keys_cover_new_keys();
 
     let (status, sanitized) = call(
         &app,
@@ -184,6 +186,8 @@ async fn sanitize_strips_nested_secret_keys_without_mutating_the_store() {
         "only the appended message belongs to the export"
     );
     assert_eq!(messages[0]["text"], "hi");
+    assert!(messages[0].get("managementKey").is_none());
+    assert!(messages[0].get("x-api-key").is_none());
 
     let (status, raw) = call(
         &app,
@@ -199,15 +203,43 @@ async fn sanitize_strips_nested_secret_keys_without_mutating_the_store() {
         raw["info"]["metadata"]["nested"]["authorization"],
         "Bearer x"
     );
+    assert_eq!(
+        raw["info"]["metadata"]["nested"]["managementKey"],
+        "sk-or-mgmt"
+    );
     assert_eq!(raw["messages"][0]["private_key"], "pem");
 
     let (status, stored) = call(&app, Method::GET, &format!("/api/session/{sid}"), None).await;
     assert_eq!(status, StatusCode::OK);
-    let stored = stored.unwrap()["data"].clone();
+    assert_store_untouched(&stored.unwrap()["data"], &app, &sid).await;
+}
+
+/// The exported `SECRET_KEYS` table must cover the keys the sanitizer is
+/// expected to strip.
+fn assert_secret_keys_cover_new_keys() {
+    for required in [
+        "managementkey",
+        "management_key",
+        "bearer",
+        "x-api-key",
+        "access",
+        "refresh",
+    ] {
+        assert!(
+            SECRET_KEYS.contains(&required),
+            "SECRET_KEYS missing {required}"
+        );
+    }
+}
+
+/// The stored session and its messages keep every secret: sanitizing is an
+/// export-time view, not a mutation.
+async fn assert_store_untouched(stored: &Value, app: &axum::Router, sid: &str) {
     assert_eq!(stored["metadata"]["apiKey"], "sk-live");
     assert_eq!(stored["metadata"]["nested"]["authorization"], "Bearer x");
+    assert_eq!(stored["metadata"]["nested"]["managementKey"], "sk-or-mgmt");
     assert_eq!(stored["metadata"]["list"][0]["token"], "t");
-    let stored_messages = message_list(&app, &sid).await;
+    let stored_messages = message_list(app, sid).await;
     assert_eq!(stored_messages[0]["apiKey"], "sk-msg");
     assert_eq!(stored_messages[0]["private_key"], "pem");
 }

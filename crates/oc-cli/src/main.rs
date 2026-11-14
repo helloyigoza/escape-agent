@@ -1,5 +1,6 @@
 //! `opencode` binary: serve the HTTP/SSE API and the web app.
 
+mod antigravity_cmd;
 mod auth;
 mod bootstrap;
 mod cli;
@@ -15,6 +16,7 @@ mod service;
 use clap::Parser;
 use tracing_subscriber::EnvFilter;
 
+use crate::antigravity_cmd::run_auth;
 use crate::auth::service_get;
 use crate::cli::{ChatOptions, Cli, Command, RunOptions, ServeOptions, ServiceCommand};
 use crate::run::{run_chat, run_once};
@@ -25,7 +27,7 @@ async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     let default_level = match &cli.command {
         Some(Command::Serve { .. } | Command::Service { .. }) => "info",
-        Some(Command::Run { .. } | Command::Chat { .. }) | None => "warn",
+        Some(Command::Run { .. } | Command::Chat { .. } | Command::Auth(_)) | None => "warn",
     };
     tracing_subscriber::fmt()
         .with_writer(std::io::stderr)
@@ -111,5 +113,6 @@ async fn main() -> anyhow::Result<()> {
         Some(Command::Service {
             command: ServiceCommand::Get { key },
         }) => service_get(&key),
+        Some(Command::Auth(args)) => run_auth(args).await,
     }
 }

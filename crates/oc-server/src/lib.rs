@@ -28,9 +28,10 @@ use axum::http::{HeaderName, Method};
 use axum::middleware;
 use axum::response::Response;
 use axum::routing::{get, patch as patch_route, post};
+use oc_antigravity::AntigravityService;
 use oc_config::ConfigService;
 use oc_lanes::LaneService;
-use oc_llm::{Catalog, LlmError};
+use oc_llm::{Catalog, LlmError, SharedLlmClient};
 use oc_lsp::LspSupervisor;
 use oc_memory::MemoryService;
 use oc_observer::ObserverEngine;
@@ -40,6 +41,7 @@ use oc_runtime::Runtime;
 use oc_store::Store;
 use oc_types::{EventEnvelope, ServerInfo};
 use tokio::net::{TcpListener, ToSocketAddrs};
+use tokio::sync::RwLock;
 use tokio::sync::broadcast;
 use tower_http::compression::CompressionLayer;
 use tower_http::compression::CompressionLevel;
@@ -77,6 +79,9 @@ pub struct AppState {
     lsp: Option<Arc<LspSupervisor>>,
     plugins: Option<Arc<PluginRegistry>>,
     lanes: Option<Arc<LaneService>>,
+    antigravity: Option<Arc<AntigravityService>>,
+    llm: Option<Arc<SharedLlmClient>>,
+    quota_cache: Arc<RwLock<data::quotas::QuotaCache>>,
     tickets: Arc<TicketStore>,
 }
 
@@ -128,6 +133,9 @@ impl AppState {
             lsp: None,
             plugins: None,
             lanes: None,
+            antigravity: None,
+            llm: None,
+            quota_cache: data::quotas::new_quota_cache(),
             tickets: Arc::new(TicketStore::new()),
         }
     }
@@ -330,6 +338,36 @@ impl AppState {
     #[must_use]
     pub fn lanes(&self) -> Option<&Arc<LaneService>> {
         self.lanes.as_ref()
+    }
+
+    /// Attach the native Google Antigravity OAuth, account pool, and quota service.
+    #[must_use]
+    pub fn with_antigravity(mut self, antigravity: Arc<AntigravityService>) -> Self {
+        self.antigravity = Some(antigravity);
+        self
+    }
+
+    #[must_use]
+    pub fn antigravity(&self) -> Option<&Arc<AntigravityService>> {
+        self.antigravity.as_ref()
+    }
+
+    /// Attach the shared LLM client so HTTP rate-limit headers and connection pools
+    /// can be queried by control-plane routes.
+    #[must_use]
+    pub fn with_llm(mut self, llm: Arc<SharedLlmClient>) -> Self {
+        self.llm = Some(llm);
+        self
+    }
+
+    #[must_use]
+    pub fn llm(&self) -> Option<&Arc<SharedLlmClient>> {
+        self.llm.as_ref()
+    }
+
+    #[must_use]
+    pub(crate) fn quota_cache(&self) -> &Arc<RwLock<data::quotas::QuotaCache>> {
+        &self.quota_cache
     }
 
     /// Short-lived single-use WebSocket tickets.
@@ -568,6 +606,8 @@ pub fn router(state: AppState) -> Router {
         .merge(data::plugin::routes())
         .merge(data::lane::routes())
         .merge(data::integration::routes())
+        .merge(data::antigravity::routes())
+        .merge(data::quotas::routes())
         .merge(data::worktree::routes())
         .merge(data::observer::routes())
         .merge(data::schedule::routes())

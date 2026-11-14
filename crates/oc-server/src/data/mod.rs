@@ -7,6 +7,8 @@
 //! are not attached the routes answer `503 ServiceUnavailableError` instead of
 //! pretending to work.
 
+pub mod antigravity;
+pub mod antigravity_tools;
 pub mod config;
 pub mod config_patch;
 pub mod events;
@@ -32,6 +34,7 @@ pub mod permission;
 pub mod plugin;
 pub mod project;
 pub mod pty;
+pub mod quotas;
 pub mod schedule;
 pub mod session;
 pub mod session_ext;

@@ -2,6 +2,7 @@
 
 use std::sync::Arc;
 
+use oc_antigravity::{AntigravityConfig, AntigravityEndpoints, AntigravityService};
 use oc_llm::{Catalog, SharedLlmClient};
 use oc_store::NewCredential;
 use serde_json::json;
@@ -146,4 +147,65 @@ async fn unknown_model_disables() {
         oc_llm::LlmClient::new().expect("client"),
     ));
     assert!(build_for_state(&state_at(root.path()), store, &config, &catalog, client).is_none());
+}
+
+#[tokio::test]
+async fn antigravity_only_model_resolves_via_transport_hook() {
+    let root = TempDir::new().expect("tempdir");
+    let config = config_at(
+        root.path(),
+        r#"{"observer": {"model": "google/antigravity-gemini-4-hydrogen"}}"#,
+    );
+    // Base catalog knows only `test/alpha` (no `google/antigravity-*`).
+    let catalog = Catalog::from_snapshot(CATALOG).expect("catalog");
+    let store = store_at(root.path()).await;
+    let svc = AntigravityService::in_memory_for_test(
+        None,
+        AntigravityConfig::default(),
+        AntigravityEndpoints::default(),
+    )
+    .await
+    .expect("antigravity service");
+    let client = Arc::new(SharedLlmClient::new(
+        oc_llm::LlmClient::new().expect("client"),
+    ));
+    client.set_hook(Some(Arc::new(svc)));
+
+    let handle = build_for_state(&state_at(root.path()), store, &config, &catalog, client)
+        .expect("observer builds via hook");
+    assert_eq!(
+        handle.engine.config().model.as_deref(),
+        Some("google/antigravity-gemini-4-hydrogen")
+    );
+}
+
+#[tokio::test]
+async fn empty_model_candidates_fall_through() {
+    let root = TempDir::new().expect("tempdir");
+    let config = config_at(
+        root.path(),
+        r#"{
+          "observer": {"model": "   ", "digest_model": ""},
+          "subagents": {"digest_model": ""},
+          "model": "test/alpha"
+        }"#,
+    );
+    let catalog = Catalog::from_snapshot(CATALOG).expect("catalog");
+    let store = store_at(root.path()).await;
+    let client = Arc::new(SharedLlmClient::new(
+        oc_llm::LlmClient::new().expect("client"),
+    ));
+    assert!(build_for_state(&state_at(root.path()), store, &config, &catalog, client).is_some());
+}
+
+#[tokio::test]
+async fn falls_back_to_root_model_when_observer_and_digest_unset() {
+    let root = TempDir::new().expect("tempdir");
+    let config = config_at(root.path(), r#"{"model": "test/alpha"}"#);
+    let catalog = Catalog::from_snapshot(CATALOG).expect("catalog");
+    let store = store_at(root.path()).await;
+    let client = Arc::new(SharedLlmClient::new(
+        oc_llm::LlmClient::new().expect("client"),
+    ));
+    assert!(build_for_state(&state_at(root.path()), store, &config, &catalog, client).is_some());
 }

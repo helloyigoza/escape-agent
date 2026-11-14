@@ -39,6 +39,7 @@ scope; the TUI must keep working against our server.
 | 23 | [release](23-release.md) | Tag-triggered builds, archive layout, version-must-match rule |
 | 24 | [UI performance](24-ui-performance.md) | Served web client audit, budgets, measured hot paths |
 | 25 | [context boxes](25-context-boxes.md) | Durable root-shared context, tool surface, expiry |
+| 26 | [Antigravity auth](26-antigravity-auth.md) | Native Google Antigravity OAuth, multi-account pool, Cloud Code gateway |
 
 ## Rules that apply to every doc
 

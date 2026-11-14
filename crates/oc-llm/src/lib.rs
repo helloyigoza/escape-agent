@@ -12,7 +12,9 @@ pub mod catalog;
 pub mod client;
 pub mod error;
 pub mod event;
+pub mod hook;
 mod protocols;
+pub mod quota;
 pub mod retry;
 pub mod sse;
 pub mod token;
@@ -27,6 +29,12 @@ pub use error::LlmError;
 pub use event::{
     ContentPart, LlmEvent, LlmMessage, LlmOptions, LlmRequest, LlmStream, Role, Timeouts, ToolDef,
     Usage,
+};
+pub use hook::{HookStreamFuture, LlmTransportHook};
+pub use quota::{
+    ProviderApiSpend, ProviderBalanceSummary, ProviderQuotaProbeResult, ProviderQuotaTarget,
+    ProviderRateLimit, QuotaCapability, QuotaWindow, extract_rate_limit, fetch_provider_quota,
+    fetch_provider_quotas, parse_reset_timestamp, provider_quota_capability,
 };
 pub use retry::{RetryPolicy, RetryState, parse_retry_after};
 pub use sse::{SseEvent, SseParser};

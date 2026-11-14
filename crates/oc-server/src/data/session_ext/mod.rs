@@ -17,7 +17,7 @@ use axum::routing::{delete, get, patch as patch_route, post, put};
 
 use crate::AppState;
 
-mod common;
+pub(crate) mod common;
 mod context;
 mod diff;
 mod export;
@@ -33,7 +33,7 @@ mod view;
 
 pub use context::context;
 pub use diff::{DiffParams, diff};
-pub use export::{ExportParams, export};
+pub use export::{ExportParams, SECRET_KEYS, export};
 pub use fork::{ForkBody, fork};
 pub use forms::{
     FormCancelParams, FormCreateBody, FormReplyBody, form_cancel, form_create, form_get, form_list,

@@ -12,12 +12,16 @@ use std::time::{Duration, Instant};
 use bytes::Bytes;
 use futures_util::stream::{self, BoxStream, StreamExt};
 use reqwest::header::{ACCEPT, CONTENT_TYPE, HeaderName, HeaderValue};
+use std::sync::RwLock;
+
 use reqwest::{Client, Response};
 
 use crate::catalog::{Protocol, ResolvedModel};
 use crate::error::LlmError;
 use crate::event::{LlmEvent, LlmRequest, LlmStream, Timeouts};
+use crate::hook::LlmTransportHook;
 use crate::protocols::{self, Decoder};
+use crate::quota::{ProviderRateLimit, extract_rate_limit, now_epoch_ms};
 use crate::retry::{RetryPolicy, RetryState, parse_retry_after};
 use crate::sse::SseParser;
 
@@ -27,6 +31,8 @@ pub struct LlmClient {
     http: Client,
     retry: RetryPolicy,
     timeouts: Timeouts,
+    hook: Arc<RwLock<Option<Arc<dyn LlmTransportHook>>>>,
+    rate_limits: Arc<RwLock<BTreeMap<String, ProviderRateLimit>>>,
 }
 
 impl LlmClient {
@@ -42,7 +48,49 @@ impl LlmClient {
             http,
             retry: RetryPolicy::default(),
             timeouts: Timeouts::default(),
+            hook: Arc::new(RwLock::new(None)),
+            rate_limits: Arc::new(RwLock::new(BTreeMap::new())),
         })
+    }
+
+    /// Borrow the underlying pooled HTTP client for auxiliary requests (e.g. quota probes).
+    #[must_use]
+    pub fn http_client(&self) -> &Client {
+        &self.http
+    }
+
+    /// Return the latest HTTP rate-limit header snapshots captured per provider.
+    #[must_use]
+    pub fn rate_limits(&self) -> Vec<ProviderRateLimit> {
+        self.rate_limits
+            .read()
+            .ok()
+            .map(|guard| guard.values().cloned().collect())
+            .unwrap_or_default()
+    }
+
+    /// Record or update the latest rate-limit header snapshot for a provider.
+    pub fn record_rate_limit(&self, snapshot: ProviderRateLimit) {
+        if let Ok(mut guard) = self.rate_limits.write() {
+            guard.insert(snapshot.provider_id.clone(), snapshot);
+        }
+    }
+
+    #[must_use]
+    pub fn with_hook(self, hook: Arc<dyn LlmTransportHook>) -> Self {
+        self.set_hook(Some(hook));
+        self
+    }
+
+    pub fn set_hook(&self, hook: Option<Arc<dyn LlmTransportHook>>) {
+        if let Ok(mut slot) = self.hook.write() {
+            *slot = hook;
+        }
+    }
+
+    #[must_use]
+    pub fn hook(&self) -> Option<Arc<dyn LlmTransportHook>> {
+        self.hook.read().ok().and_then(|slot| slot.clone())
     }
 
     #[must_use]
@@ -69,6 +117,11 @@ impl LlmClient {
         reason = "the public API returns the typed LlmError directly rather than boxing it"
     )]
     pub async fn stream(&self, request: LlmRequest) -> Result<LlmStream, LlmError> {
+        if let Some(hook) = self.hook()
+            && hook.handles(&request)
+        {
+            return hook.stream(request).await;
+        }
         let model = request.model.clone();
         if model.protocol == Protocol::Unsupported {
             return Err(LlmError::UnsupportedProtocol {
@@ -96,7 +149,14 @@ impl LlmClient {
             message: format!("could not encode request body: {error}"),
         })?;
         let response = self
-            .send(&url, &body, &headers, &timeouts, deadline)
+            .send(
+                &url,
+                &body,
+                &headers,
+                &timeouts,
+                deadline,
+                Some((&model.provider.id, &model.model.id)),
+            )
             .await?;
         let chunk_timeout = timeouts.chunk;
         let state = StreamState {
@@ -160,11 +220,12 @@ impl LlmClient {
         headers: &[(String, String)],
         timeouts: &Timeouts,
         deadline: Option<Instant>,
+        target: Option<(&str, &str)>,
     ) -> Result<Response, LlmError> {
         let mut state = RetryState::new(self.retry.clone());
         loop {
             let result = self
-                .attempt(url, body, headers, timeouts.header, deadline)
+                .attempt(url, body, headers, timeouts.header, deadline, target)
                 .await;
             let error = match result {
                 Ok(response) => return Ok(response),
@@ -194,6 +255,7 @@ impl LlmClient {
         headers: &[(String, String)],
         header_timeout: Duration,
         deadline: Option<Instant>,
+        target: Option<(&str, &str)>,
     ) -> Result<Response, LlmError> {
         let mut builder = self
             .http
@@ -229,6 +291,17 @@ impl LlmClient {
             };
 
         let status = response.status();
+        if let Some((provider_id, model_id)) = target
+            && let Some(snapshot) = extract_rate_limit(
+                provider_id,
+                model_id,
+                status.as_u16(),
+                response.headers(),
+                now_epoch_ms(),
+            )
+        {
+            self.record_rate_limit(snapshot);
+        }
         if status.is_success() {
             return Ok(response);
         }
@@ -396,6 +469,18 @@ pub struct SharedLlmClient(pub Arc<LlmClient>);
 impl SharedLlmClient {
     pub fn new(client: LlmClient) -> Self {
         Self(Arc::new(client))
+    }
+
+    /// Borrow the underlying HTTP client pool.
+    #[must_use]
+    pub fn http_client(&self) -> &Client {
+        self.0.http_client()
+    }
+
+    /// Return the latest HTTP rate-limit telemetry captured per provider.
+    #[must_use]
+    pub fn rate_limits(&self) -> Vec<ProviderRateLimit> {
+        self.0.rate_limits()
     }
 }
 

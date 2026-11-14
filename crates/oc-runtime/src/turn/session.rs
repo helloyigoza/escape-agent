@@ -43,8 +43,14 @@ impl Runtime {
                 continue;
             };
             let key = match value.get("type").and_then(Value::as_str) {
-                Some("oauth") => value.get("access_token").or_else(|| value.get("key")),
-                _ => value.get("key").or_else(|| value.get("access_token")),
+                Some("oauth") => value
+                    .get("access")
+                    .or_else(|| value.get("access_token"))
+                    .or_else(|| value.get("key")),
+                _ => value
+                    .get("key")
+                    .or_else(|| value.get("access"))
+                    .or_else(|| value.get("access_token")),
             }
             .and_then(Value::as_str)
             .filter(|key| !key.is_empty());
@@ -97,7 +103,9 @@ impl Runtime {
                     })
             })
             .ok_or_else(|| RuntimeError::ModelUnavailable("no model configured".to_owned()))?;
-        let resolved = config.catalog.resolve(&model_ref.to_reference())?;
+        let resolved = config
+            .client
+            .resolve_model(&config.catalog, &model_ref.to_reference())?;
         let context_window = resolved.model.limit.context;
         let session_rules = session_rules(info);
 

@@ -85,7 +85,12 @@ impl Runtime {
         // A repair must never persist a model the catalog cannot run: every
         // later turn would fail at `resolve_turn` and the session would be
         // stuck until a human patches it.
-        if let Err(error) = self.inner.config.catalog.resolve(model) {
+        if let Err(error) = self
+            .inner
+            .config
+            .client
+            .resolve_model(&self.inner.config.catalog, model)
+        {
             return Err(RuntimeError::Config(format!(
                 "repair model {model:?} is not in the catalog: {error}"
             )));

@@ -38,16 +38,15 @@ pub(crate) struct Services {
     pub(crate) store: std::sync::Arc<oc_store::Store>,
     pub(crate) config: std::sync::Arc<oc_config::ConfigService>,
     pub(crate) catalog: std::sync::Arc<oc_llm::Catalog>,
+    pub(crate) antigravity: Option<Arc<oc_antigravity::AntigravityService>>,
 }
 
-pub(crate) async fn open_services(
-    directory: &std::path::Path,
-    db: Option<PathBuf>,
-) -> anyhow::Result<Services> {
+/// Open the SQLite store with the legacy checksum-mismatch fallback.
+pub(crate) async fn open_store(db: Option<PathBuf>) -> anyhow::Result<Arc<oc_store::Store>> {
     let explicit_db = db.is_some();
     let db_path = db.unwrap_or_else(default_db_path);
-    let store = match oc_store::Store::open(&db_path).await {
-        Ok(store) => std::sync::Arc::new(store),
+    match oc_store::Store::open(&db_path).await {
+        Ok(store) => Ok(Arc::new(store)),
         Err(error) if !explicit_db && error.to_string().contains("checksum") => {
             let fallback = db_path.with_file_name("opencode-rust.db");
             tracing::warn!(
@@ -55,16 +54,21 @@ pub(crate) async fn open_services(
                 fallback = %fallback.display(),
                 "default database has an incompatible migration table; using opencode-rust.db"
             );
-            std::sync::Arc::new(
+            Ok(Arc::new(
                 oc_store::Store::open(&fallback)
                     .await
                     .with_context(|| format!("open database {}", fallback.display()))?,
-            )
+            ))
         }
-        Err(error) => {
-            return Err(error).with_context(|| format!("open database {}", db_path.display()));
-        }
-    };
+        Err(error) => Err(error).with_context(|| format!("open database {}", db_path.display())),
+    }
+}
+
+pub(crate) async fn open_services(
+    directory: &std::path::Path,
+    db: Option<PathBuf>,
+) -> anyhow::Result<Services> {
+    let store = open_store(db).await?;
     let config = std::sync::Arc::new(
         oc_config::ConfigService::load(oc_config::LoadOptions {
             directory: directory.to_path_buf(),
@@ -72,13 +76,34 @@ pub(crate) async fn open_services(
         })
         .context("load configuration")?,
     );
-    let catalog = std::sync::Arc::new(
-        oc_server::catalog_from_config(config.as_ref()).context("load model catalog")?,
-    );
+    let mut catalog =
+        oc_server::catalog_from_config(config.as_ref()).context("load model catalog")?;
+    // `config_dir: None` is deliberate: Antigravity account, signature and
+    // model-cache state is global (`resolve_config_dir()`), so every project
+    // shares one account pool; only `antigravity.jsonc` discovery is per-project.
+    let antigravity = match oc_antigravity::AntigravityService::open(
+        Some(Arc::clone(&store)),
+        None,
+        Some(directory.to_path_buf()),
+        oc_antigravity::AntigravityEndpoints::default(),
+    )
+    .await
+    {
+        Ok(svc) => {
+            svc.overlay_catalog(&mut catalog);
+            Some(Arc::new(svc))
+        }
+        Err(error) => {
+            tracing::warn!(%error, "Antigravity service unavailable");
+            None
+        }
+    };
+    let catalog = std::sync::Arc::new(catalog);
     Ok(Services {
         store,
         config,
         catalog,
+        antigravity,
     })
 }
 
@@ -101,6 +126,10 @@ pub(crate) async fn attach_runtime(
     let client = Arc::new(oc_llm::SharedLlmClient::new(
         oc_llm::LlmClient::new().context("create provider client")?,
     ));
+    if let Some(antigravity) = services.antigravity.clone() {
+        let hook: Arc<dyn oc_llm::LlmTransportHook> = antigravity;
+        client.set_hook(Some(hook));
+    }
     let mut runtime = oc_runtime::Runtime::new(oc_runtime::RuntimeConfig {
         store: services.store.clone(),
         config: services.config.clone(),
@@ -140,7 +169,7 @@ pub(crate) async fn attach_runtime(
         Arc::clone(&services.store),
         services.config.as_ref(),
         services.catalog.as_ref(),
-        client,
+        Arc::clone(&client),
     ) {
         let engine = Arc::clone(&handle.engine);
         observer_engine = Some(engine);
@@ -155,7 +184,8 @@ pub(crate) async fn attach_runtime(
     let mut state = state
         .with_runtime(runtime.clone())
         .with_permissions(broker.clone())
-        .with_memory(memory);
+        .with_memory(memory)
+        .with_llm(Arc::clone(&client));
     if let Some(engine) = observer_engine {
         state = state.with_observer_engine(engine);
     }
@@ -198,6 +228,14 @@ pub(crate) async fn attach_extensions(
     if let Some(supervisor) = state.lsp().cloned() {
         let provider: Arc<dyn oc_runtime::ToolProvider> =
             Arc::new(oc_server::data::lsp_tools::LspToolProvider::new(supervisor));
+        providers.push(provider);
+    }
+
+    if let Some(antigravity) = services.antigravity.clone() {
+        antigravity.spawn_background_version_check();
+        state = state.with_antigravity(Arc::clone(&antigravity));
+        let provider: Arc<dyn oc_runtime::ToolProvider> =
+            Arc::new(oc_server::data::antigravity_tools::AntigravityToolProvider::new(antigravity));
         providers.push(provider);
     }
 

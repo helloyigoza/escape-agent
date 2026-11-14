@@ -17,6 +17,7 @@ use std::collections::BTreeSet;
 use axum::Json;
 use axum::extract::{Path, RawQuery, State};
 use axum::http::HeaderMap;
+use oc_antigravity::ANTIGRAVITY_PROVIDER_ID;
 use oc_llm::{Activation, Catalog, LlmError, ModelInfo, ProviderInfo};
 use oc_types::{ApiError, LocationEnvelope};
 use serde_json::{Value, json};
@@ -66,7 +67,10 @@ impl Params {
 ///
 /// The credential store is optional: without one only configuration and
 /// environment variables decide availability.
-async fn available_provider_ids(state: &AppState, catalog: &Catalog) -> BTreeSet<String> {
+pub(crate) async fn available_provider_ids(
+    state: &AppState,
+    catalog: &Catalog,
+) -> BTreeSet<String> {
     fn add(catalog: &Catalog, available: &mut BTreeSet<String>, id: &str) {
         if catalog
             .provider(id)
@@ -118,7 +122,136 @@ async fn available_provider_ids(state: &AppState, catalog: &Catalog) -> BTreeSet
         }
     }
 
+    if let Some(ag) = state.antigravity()
+        && ag.account_count() > 0
+    {
+        add(catalog, &mut available, "google");
+    }
+
     available
+}
+
+/// Providers the quota report may surface: only those with a **genuinely
+/// active** credential (or a usable Antigravity account), never providers that
+/// merely exist in the catalog, in history, or as a disabled credential row.
+///
+/// This is deliberately separate from [`available_provider_ids`]: the model and
+/// provider routes must keep listing a provider whose credential the user
+/// deactivated (the settings UI has to offer re-activation), whereas the quota
+/// report measures live usage and must not show a card for it.
+///
+/// Rules, in order:
+///
+/// 1. An **active** credential row (`active == true`). `opencode-go` also
+///    accepts an active `opencode` credential because it is an alias of that
+///    integration. A `google` OAuth row is Antigravity-managed and is decided by
+///    rule 4 instead; only a direct (non-OAuth) `google` key counts here.
+/// 2. `providers` configuration keys and environment variables, but **only**
+///    for provider ids that own no credential row at all. That keeps a plain
+///    `ANTHROPIC_API_KEY` / `providers.anthropic` setup working while a
+///    provider whose stored credential was deactivated stays hidden.
+/// 3. `google` only when Antigravity has at least one usable account
+///    (`enabled && !revoked && !verification_required`).
+pub(crate) async fn active_provider_ids(state: &AppState, catalog: &Catalog) -> BTreeSet<String> {
+    fn add(catalog: &Catalog, available: &mut BTreeSet<String>, id: &str) {
+        if catalog
+            .provider(id)
+            .is_some_and(|provider| provider.activation != Activation::Disabled)
+        {
+            available.insert(id.to_owned());
+        }
+    }
+
+    let mut active = BTreeSet::new();
+    let antigravity_attached = state.antigravity().is_some();
+
+    // Integration ids that own at least one credential row, active or not. An
+    // env/config-only provider must own no row at all (rule 2).
+    let mut credential_integrations: BTreeSet<String> = BTreeSet::new();
+    // Integrations with at least one `active == true` row. Kept apart from
+    // `active` so the `opencode-go` alias works even when `opencode` itself is
+    // absent from the catalog.
+    let mut active_integrations: BTreeSet<String> = BTreeSet::new();
+    // `google` reached through a direct API key rather than the account pool.
+    let mut google_direct_key = false;
+    if let Some(store) = state.store() {
+        match store.list_credentials().await {
+            Ok(entries) => {
+                for entry in entries {
+                    let Some(id) = entry.get("integrationID").and_then(Value::as_str) else {
+                        continue;
+                    };
+                    credential_integrations.insert(id.to_owned());
+                    if entry.get("active").and_then(Value::as_bool) != Some(true) {
+                        continue;
+                    }
+                    active_integrations.insert(id.to_owned());
+                    let is_oauth =
+                        entry.pointer("/value/type").and_then(Value::as_str) == Some("oauth");
+                    if id == ANTIGRAVITY_PROVIDER_ID && antigravity_attached {
+                        // The pool owns an OAuth `google` credential: a disabled
+                        // or revoked account must not surface a quota card.
+                        if !is_oauth {
+                            google_direct_key = true;
+                        }
+                        continue;
+                    }
+                    add(catalog, &mut active, id);
+                }
+            }
+            Err(error) => {
+                tracing::warn!(%error, "could not list credentials for active provider availability");
+            }
+        }
+    }
+
+    // `opencode-go` is an alias of the `opencode` integration: an active
+    // `opencode` credential is a valid credential for `opencode-go` too, and no
+    // other credential family may stand in.
+    if active_integrations.contains("opencode") {
+        add(catalog, &mut active, "opencode-go");
+    }
+    if google_direct_key {
+        add(catalog, &mut active, ANTIGRAVITY_PROVIDER_ID);
+    }
+
+    // Rule 2: configuration and environment only decide availability for
+    // providers that store no credential at all.
+    if let Some(config) = state.config()
+        && let Some(providers) = config.merged().get("providers").and_then(Value::as_object)
+    {
+        for id in providers.keys() {
+            if credential_integrations.contains(id) {
+                continue;
+            }
+            add(catalog, &mut active, id);
+        }
+    }
+
+    for provider in catalog.providers() {
+        if provider.activation == Activation::Disabled {
+            continue;
+        }
+        if credential_integrations.contains(&provider.id) {
+            continue;
+        }
+        if provider
+            .env
+            .iter()
+            .any(|name| std::env::var_os(name).is_some())
+        {
+            active.insert(provider.id.clone());
+        }
+    }
+
+    if antigravity_attached
+        && let Some(ag) = state.antigravity()
+        && ag.has_usable_accounts()
+    {
+        add(catalog, &mut active, ANTIGRAVITY_PROVIDER_ID);
+    }
+
+    active
 }
 
 /// `GET /api/model?types=`
@@ -135,6 +268,20 @@ pub async fn models(
     let types = params.list("types");
     let mut models = catalog.models();
     models.retain(|model| available.contains(&model.provider_id));
+    if available.contains("google")
+        && let Some(ag) = state.antigravity()
+    {
+        for extra in ag.antigravity_model_infos() {
+            if let Some(pos) = models
+                .iter()
+                .position(|m| m.provider_id == "google" && m.id == extra.id)
+            {
+                models[pos] = extra;
+            } else {
+                models.push(extra);
+            }
+        }
+    }
     if !types.is_empty() {
         models.retain(|model| {
             model
@@ -163,9 +310,18 @@ pub async fn default_model(
     };
     // `resolve` reports unknown providers/models, invalid references and
     // unknown variants; all of them are a missing default model to the client.
-    let model = catalog
-        .resolve(&reference)
-        .map_err(|error| ErrorResponse::from(resolve_error(&error)))?;
+    let model = match catalog.resolve(&reference) {
+        Ok(model) => model,
+        Err(error) => {
+            if let Some(ag) = state.antigravity()
+                && let Some(resolved) = ag.resolve_catalog_model(catalog.as_ref(), &reference)
+            {
+                resolved
+            } else {
+                return Err(ErrorResponse::from(resolve_error(&error)));
+            }
+        }
+    };
     let available = available_provider_ids(&state, catalog.as_ref()).await;
     if !available.contains(&model.provider.id) {
         return Err(model_not_found(

@@ -161,9 +161,19 @@ files that did not exist at capture time; skipped paths stay untouched.
 | GET `/api/integration`, `/api/integration/:id` | loc | L | every non-disabled catalog provider, connectable via a `key` method plus an `env` method when env names are declared |
 | POST `/api/integration/:id/connect/key` | `{key,answer?,label?}` | N (204) |
 | POST `/api/integration/:id/connect/external` | `{methodID,answer?,label?}` | N (204) |
-| POST `/api/integration/:id/connect/oauth` | `{methodID}` | — (400 when the catalog method is absent; 501 only for a registered oauth method, unreachable with today's catalog) |
-| GET/DELETE `/api/integration/:id/connect/oauth/:attemptID` | — | — (404 `IntegrationAttemptNotFoundError` / 204) |
-| POST `/api/integration/:id/connect/oauth/:attemptID/complete` | `{code?}` | — (404) |
+| POST `/api/integration/:id/connect/oauth` | `{methodID,answer?,label?}` | `L` (`Integration.AttemptEncoded`; starts Google Antigravity PKCE OAuth when `id="google"` & `methodID="antigravity"`; `501` for unimplemented OAuth engines such as remote MCP) |
+| GET/DELETE `/api/integration/:id/connect/oauth/:attemptID` | — | `L` (`Integration.AttemptStatus` / `204` cancel, `404 IntegrationAttemptNotFoundError` when unknown) |
+| POST `/api/integration/:id/connect/oauth/:attemptID/complete` | `{code?}` | `N` (`204` on Antigravity code/URL completion; `404 IntegrationAttemptNotFoundError` when unknown) |
+| GET `/api/antigravity/accounts` | — | `data::antigravity`; pooled accounts, `count`, `usableCount`, version |
+| POST `/api/antigravity/accounts/:id/{select,enable,disable}` | — | `data::antigravity`; manage active/enabled account and sync active credential |
+| DELETE `/api/antigravity/accounts/:id` | — | `data::antigravity`; remove account from pool (204) |
+| GET `/api/antigravity/quotas` | `refresh?(bool)`, `id?` | `data::antigravity`; cached snapshot (account pool + `discoveredModels`); `refresh=true` also runs the live `refresh_quotas_and_models` probe and adds its truthful `report` on success or an `error` string on failure (the cached snapshot is still served either way); `id=` filters by index, hash, email or label, and a filter that matches nothing is 404 `AntigravityAccountNotFoundError` |
+| POST `/api/antigravity/quotas` | — | `data::antigravity`; live quota + model refresh across enabled accounts (`QuotaRefreshReport`); `NoAccounts` → 409 `InvalidRequestError` with `kind:"no_accounts"`, `OAuth`/`Config` → 400 `InvalidRequestError`, anything else → 502 `ProviderError` |
+| POST `/api/antigravity/models/refresh` | — | `data::antigravity`; fetch & cache `/v1internal:fetchAvailableModels` inventory; same error mapping as the quota refresh |
+| GET `/api/quotas` | `refresh?(bool)` | `data::quotas`; unified per-provider quota/usage report `{fetchedAtMs,summary,providers}`; live probes and the local-usage rollup are cached server-side for 60 s (`CACHE_TTL_MS`) and `refresh=true` bypasses that cache; `summary` is `{providerCount,liveQuotaCount,spend5hUsd,spend24hUsd,spend7dUsd,spend30dUsd}`; Antigravity windows carry a stable `groupKey` and OpenRouter carries `hasManagementKey`/`managementKeySource` (`env`\|`credential`\|`config`) |
+| POST `/api/quotas/refresh` | — | `data::quotas`; drops every cached probe and the usage rollup, then re-probes live providers; same body as `GET /api/quotas` |
+| PUT `/api/quotas/openrouter/management-key` | `{key}` | `data::quotas`; stores the OpenRouter management key on an existing `openrouter` credential (else the synthetic `openrouter-management` row) and answers `{configured:true}`; a blank/whitespace key is 400 `InvalidRequestError` |
+| DELETE `/api/quotas/openrouter/management-key` | — | `data::quotas`; clears the stored management key and the cached `openrouter` probe (204). `OPENROUTER_MANAGEMENT_KEY` is read first at probe time; when it owns the key the clear is refused with 409 `InvalidRequestError` and `data.kind:"env_managed"` |
 | POST `/api/integration/:id/connect/command` | `{methodID,label?}` | — (400 when the catalog method is absent; 501 only for a registered command method, unreachable with today's catalog) |
 | GET/DELETE `/api/integration/:id/connect/command/:attemptID` | — | — (404 / 204) |
 | POST `/api/experimental/integration/wellknown` | `{url}` | — (503 discovery not configured) |
@@ -378,8 +388,10 @@ and log the correlation id.
 12. WebSocket upgrades bypass header auth; they require a single-use ticket
     minted by `connect-token` with `x-opencode-ticket: 1`. They are still
     subject to the `Host` guard (403 `ForbiddenError`).
-13. Integration OAuth/command engines are absent: connect attempts answer `501`
-    and attempt lookups `404`; only `key`/`external` connect writes credentials.
+13. Integration OAuth/command engines are absent except Google Antigravity
+    (`id="google"`, `methodID="antigravity"`, native PKCE): every other OAuth
+    attempt answers `501` and attempt lookups `404`; only `key`/`external`
+    connect writes credentials.
 
 ## Our extensions (no upstream compat promise)
 

@@ -89,6 +89,21 @@ pub async fn select_model(
         && catalog
             .model(&body.model.provider_id, &body.model.id)
             .is_none()
+        && !(body.model.provider_id == "google"
+            && state.antigravity().is_some_and(|ag| {
+                let reference = match body.model.variant.as_deref() {
+                    Some(variant) => {
+                        format!("{}/{}#{variant}", body.model.provider_id, body.model.id)
+                    }
+                    None => format!("{}/{}", body.model.provider_id, body.model.id),
+                };
+                ag.resolve_catalog_model(catalog.as_ref(), &reference)
+                    .is_some()
+                    || ag
+                        .antigravity_model_infos()
+                        .iter()
+                        .any(|m| m.id == body.model.id || m.model_id == body.model.id)
+            }))
     {
         return Err(ApiError::not_found(
             "ModelNotFoundError",

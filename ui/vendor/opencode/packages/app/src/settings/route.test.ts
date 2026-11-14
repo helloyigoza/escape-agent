@@ -50,7 +50,7 @@ describe("settings route", () => {
   })
 
   test("round trips the agentic server pages with an encoded server key", () => {
-    for (const tab of ["memory", "goals", "observer", "subagents", "lanes"] as const) {
+    for (const tab of ["quotas", "memory", "goals", "observer", "subagents", "lanes"] as const) {
       const view: SettingsView = { type: "root", tab, server: "wsl:Debian" }
       expect(settingsViewUrl(view)).toBe(`/settings?server=wsl%3ADebian&tab=${tab}`)
       expect(parse(view)).toEqual({ type: "root", tab, server: "wsl:Debian", subtab: undefined })

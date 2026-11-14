@@ -37,16 +37,25 @@ them. An external `OC_UPSTREAM` must be patched with `git apply --check` first:
    reports `time.released === 0`.
 4. `0004-background-metadata-guard.patch` — tolerate a running shell tool part
    without `metadata`.
-5. `0006-stop-interrupt.patch` — durable Stop: the client store remembers a
+5. `0005-attachment-mime-guard.patch` — tolerate attachments and prompt files
+   without `mime`/`source`, and read mime from data URLs.
+6. `0006-stop-interrupt.patch` — durable Stop: the client store remembers a
    requested stop and reports the session idle until an execution boundary
    settles it, and the composer interrupts once with `resume:false`.
+7. `0007-token-counter-live-reset.patch` — the context indicator measures the
+   live per-step token count against the compaction ceiling.
+8. `0008-settings-quotas.patch` — the per-server `quotas` settings page
+   (`settings/quotas/`), the provider quota section in the Usage dialog, and the
+   `en`/`tr` strings. The settings tab polls every 60 s; the Usage dialog never
+   polls and reads the cached snapshot.
 
 Patch scope (see `docs/13-ui.md`):
 
-1. settings tabs: memory, goals, observer, subagents, lanes;
+1. settings tabs: memory, goals, observer, subagents, lanes, quotas;
 2. session tree + sibling drawer;
 3. observer repair rows and goal chip;
-4. lane status in the subagent bar.
+4. lane status in the subagent bar;
+5. provider quotas, spend and balance in settings and the Usage dialog.
 
 ## Endpoints the UI consumes
 
@@ -61,6 +70,22 @@ answers `503`:
 | Observer rows + banner | `GET /api/experimental/observer`, `GET /api/experimental/observer/repairs` |
 | Goal chip | `GET /api/experimental/goal?sessionID=`, `goal.updated` |
 | Lane pill | `GET /api/experimental/lane`, `lane.*` |
+| Quotas tab + Usage dialog | `GET /api/quotas`, `POST /api/quotas/refresh` |
+
+Quota writes:
+
+| Action | Route |
+|---|---|
+| Save / clear the OpenRouter management key | `PUT` / `DELETE /api/quotas/openrouter/management-key` |
+| Antigravity account select, enable, disable | `POST /api/antigravity/accounts/:id/{select,enable,disable}` |
+
+The antigravity routes are registered by `data::antigravity::routes()` in
+`crates/oc-server/src/lib.rs` (merged into the protected router), not inline in
+the router body. `GET /api/quotas` answers `503` when the server runs without
+the quota service, which the UI renders as an in-page "quota service not
+attached" state rather than an error, and it never retries that answer. Only
+the settings tab polls (60 s); the Usage dialog passes `enabled: () => false`
+and shows whatever the tab already cached.
 
 ## Current state
 

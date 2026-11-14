@@ -139,9 +139,24 @@ public surface; `cargo doc -p <crate> --no-deps` is the reference.
 
 ### `oc-llm`
 - `Catalog::{embedded, from_snapshot, from_snapshot_with_config, apply_config,
-  models, providers, resolve}`; embedded upstream snapshot (7.9 MB).
-- `LlmClient::stream(LlmRequest)` → `LlmStream`; `SharedLlmClient`;
-  `LlmEvent`/`LlmMessage`/`ToolDef`/`LlmOptions`/`Usage` in `event.rs`;
+  models, providers, resolve, upsert_provider, upsert_provider_models}`;
+  embedded upstream snapshot (7.9 MB).
+- `LlmClient::{new, stream, http_client, rate_limits, record_rate_limit,
+  with_hook, set_hook, hook, with_retry_policy, with_timeouts}` and
+  `SharedLlmClient::{new, http_client, rate_limits, set_hook, hook,
+  resolve_model, dynamic_models}`. There is no `new_with_hook`: `with_hook` is
+  the builder on `LlmClient`, `set_hook` the setter on `SharedLlmClient`.
+- `LlmTransportHook` (`handles`, `stream -> HookStreamFuture`,
+  `resolve_model`, `dynamic_models`) in `hook.rs` lets an OAuth gateway own
+  transport while the shared client keeps one HTTP pool and rate-limit log.
+- `quota`: `QuotaCapability`, `provider_quota_capability`,
+  `ProviderRateLimit`, `extract_rate_limit`, `ProviderQuotaTarget`,
+  `QuotaWindow`, `ProviderBalanceSummary`, `ProviderApiSpend`,
+  `ProviderQuotaProbeResult`, `fetch_provider_quota`,
+  `fetch_provider_quotas`, `parse_reset_timestamp` are re-exported at the
+  crate root; `parse_rfc3339_ms`, `default_http_client` and `now_epoch_ms` are
+  public but only as `oc_llm::quota::*`.
+- `LlmEvent`/`LlmMessage`/`ToolDef`/`LlmOptions`/`Usage` in `event.rs`;
   `Protocol::Unsupported` for providers not yet implemented.
 - Retries 2s→10s, 10 attempts, `retry-after` ≤15 min; mid-stream failures emit
   `ProviderError` (no replay).
@@ -346,6 +361,19 @@ public surface; `cargo doc -p <crate> --no-deps` is the reference.
   coalescing state is in memory only, so `tree_rev`/`subscribers` are never
   persisted and a restart drops coalescing without dropping a run.
 
+### `oc-antigravity`
+- `AntigravityService::{open, in_memory_for_test, start_oauth, poll_oauth,
+  cancel_oauth, complete_oauth, list_accounts_status, select_account,
+  set_account_enabled, remove_account, remove_by_credential_id,
+  select_by_credential_id, usable_account_count, has_usable_accounts,
+  overlay_catalog, antigravity_model_infos, refresh_quotas_and_models,
+  spawn_background_version_check}`.
+- Implements `oc_llm::LlmTransportHook` in `gateway.rs` for `google`
+  Antigravity models and active Antigravity-backed OAuth credentials.
+- Exposes `GoogleSearchTool` (`google_search`, `oc_tools::Tool`) and V4
+  `antigravity-accounts.json` persistence with V1–V3 migration. See
+  [doc 26](26-antigravity-auth.md).
+
 ### `oc-server` route modules
 Every route group is a module under `crates/oc-server/src/data/` exposing
 
@@ -355,8 +383,8 @@ pub fn routes() -> axum::Router<crate::AppState>;
 
 plus its handlers. `lib.rs` builds one protected router and `.merge()`s the
 modules (`session_ext`, `shells`, `experimental`, `mcp`, `lsp`, `plugin`,
-`lane`, `observer`, `integration`, `worktree`), then applies the auth
-middleware. Rules:
+`lane`, `observer`, `integration`, `antigravity`, `quotas`, `worktree`), then
+applies the auth middleware. Rules:
 
 - a route is registered exactly once; a module never owns a stateful router;
 - handlers return `Result<_, ErrorResponse>`/`Json<...>` and use the shared
@@ -391,7 +419,10 @@ entry whose link target is missing (or is not a file/directory) is skipped.
 - One cloneable struct; every heavy field is `Option<Arc<…>>` and has a
   `with_*` builder plus accessor: `store`, `config`, `catalog`, `runtime`,
   `memory`, `observer`, `permissions`, `pty`, `mcp`, `lsp`, `plugins`,
-  `lanes`, `tickets`.
+  `lanes`, `tickets`, `antigravity` (`with_antigravity`/`antigravity`), `llm`
+  (`with_llm`/`llm`, the shared `SharedLlmClient` whose HTTP pool and captured
+  rate-limit headers feed `/api/quotas`). `quota_cache` is not optional: it is
+  an always-present `Arc<RwLock<QuotaCache>>` with a crate-private accessor.
 - `lanes` is the attached `oc_lanes::LaneService`; lane routes answer `503
   ServiceUnavailableError` when it is absent.
 - `with_lsp` also bridges the supervisor's diagnostics stream onto the SSE bus.
@@ -407,6 +438,17 @@ entry whose link target is missing (or is not a file/directory) is skipped.
   execution, so connecting a server takes effect on the next turn without a
   restart.
 
+### Observer model resolution (`oc-server`)
+- `observer_host::build_for_state` resolves the judge through
+  `SharedLlmClient::resolve_model`, so an attached `LlmTransportHook` (for
+  example the Antigravity gateway) can own a model the startup catalog
+  snapshot does not contain; it does not use `Catalog::resolve` directly.
+- First non-empty candidate wins after trimming: `observer.model`,
+  `observer.digest_model`, `subagents.digest_model`, the root `model`. No
+  candidate, a failed resolution, or an `Unsupported` protocol disables the
+  observer and logs one line; credentials are resolved per request, so a
+  missing env var alone does not disable it.
+
 ### Schedule runner (`oc-cli`)
 - `spawn_schedule_runner(AppState, CancellationToken)` starts after the runtime
   owns the store; it returns `None` when either is absent. It ticks every
@@ -421,6 +463,16 @@ entry whose link target is missing (or is not a file/directory) is skipped.
 - Outcome is `late` when ≥ 60 s behind (`SCHEDULE_LATE_AFTER_MS`), else
   `fired`; failures record `failed` so the same due instant is not retried on
   every tick.
+
+### Provider auth (`oc-cli`)
+- `opencode auth {login,list,status,quota,use,enable,disable,remove,models}`
+  covers Google Antigravity OAuth (loopback or manual code) and plain provider
+  API keys; the global flags are `-C/--directory`, `--db` and `--json`
+  (structured output). `status`/`models` accept `--refresh`, `quota` accepts
+  `--cached`.
+- Interactive chat exposes the same pool through `/ag` (alias
+  `/antigravity`): `status`, `quota [cached]`, `use|enable|disable <account>`,
+  `models [refresh]`.
 
 ## Local conventions inside `Session.Metadata`
 
@@ -728,16 +780,19 @@ across sibling modules are `pub(super)`.
 
 | Crate | Facade → submodules |
 |---|---|
-| `oc-runtime` | `turn` → `types, assistant, stats, session, stream, finalize, tools, permissions, compaction`; `subagent` → `settings, state, tree, protocol, wait, spawn, talk, roster, write, digest`; `observer` → `repair, host, tick, repair_worker, strips`; `lane` → `runner, output, shell_tool, tool`; `prompt` → `sources, transcript, model, tests`; `skill` → `activate, write, lint, util, tests`; `runtime` → `traits, actor` |
-| `oc-server` | `data/session_ext` → `common, fork, revert, context, diff, view, forms, saved_permissions, export, import, stats, skill, instructions`; `data/session` → `bodies, crud, select, run, prompt, wait, events`; `permission` → `state, rules, tests`; `observer_host` → `model, notifier, tests`; `data/shells` → `util, selection, http, persistent, manager/{output,process}`; `data/worktree` → `git, paths, plan, http`; `data/vcs` → `git, refs, status, diff, http`; shared `data/git.rs` |
-| `oc-llm` | `catalog` → `types, resolved, snapshot, overlay, resolve, reference, cost, source, convert, v1, variants, util, time, tests` |
-| `oc-config` | `normalize` → `ctx, keys, root, copy, permissions, policies, model, agents, commands, resources, skills, compaction, mcp, providers, experimental`; `jsonc.rs`, `merge.rs` |
+| `oc-types` | `payload` → `lifecycle, compaction, meta, message, trace, step` |
+| `oc-runtime` | `turn` → `types, assistant, budget, stats, session, stream, finalize, tools, permissions, compaction, pressure, repetition, stall, verify, run, settle`; `turn/tools` → `run, outcome, spill`; `subagent` → `settings, state, tree, protocol, wait, spawn, talk, roster, write, digest`; `subagent/spawn` → `continue_child, partition, prepare`; `observer` → `advice, repair, host, tick, repair_worker, strips`; `lane` → `runner, output, shell_tool, tool`; `prompt` → `sources, transcript, model, tests`; `skill` → `activate, write, lint, util, tests`; `runtime` → `traits, actor, interrupt, state` |
+| `oc-server` | `data/session_ext` → `common, fork, revert, context, diff, view, forms, saved_permissions, export, import, stats, skill, instructions`; `data/session` → `bodies, crud, select, run, prompt, wait, events`; `data/integration` → `bodies, command, connect, credential, errors, registry, view`; `permission` → `state, rules, tests`; `observer_host` → `model, notifier, tests`; `data/shells` → `util, selection, http, persistent, manager/{output,process}`; `data/worktree` → `git, paths, plan, http`; `data/vcs` → `git, refs, status, diff, http`; shared `data/git.rs`; `data/antigravity.rs`, `data/quotas.rs` |
+| `oc-llm` | `catalog` → `types, resolved, snapshot, overlay, resolve, reference, cost, source, convert, v1, variants, util, time, tests`; `quota` → `headers, time, types, util, probes/{mod,openrouter,deepseek,minimax,moonshot,opencode_go,siliconflow,zai}` |
+| `oc-config` | `normalize` → `ctx, keys, root, copy, permissions, policies, model, agents, commands, resources, skills, compaction, mcp, providers, experimental`; `service` → `agents, commands, ctor, misc, skills`; `jsonc.rs`, `merge.rs` |
 | `oc-store` | `schedule` → `when, ends, model, row, repo, zone, cron` |
 | `oc-plugin` | `sidecar` → `config, status, process, inner, dispatch, register, error` |
 | `oc-mcp` | `client` → `types, handler, session, request, catalog, accessors, handshake` |
 | `oc-lsp` | `client` → `types, spawn, accessors, handshake, request, sync, diagnostics, lifecycle, dispatch, io, json` |
-| `oc-cli` | `cli, serve, bootstrap, schedule, lane, paths, auth, net` |
-| `oc-tools` | `code_map` → `files, graph_ops, map, native_index, outline, parsers, precision, radar, ripwire, ripwire_mcp`; `symbol_edit` |
+| `oc-observer` | `registry` → `strip, caps, store` |
+| `oc-cli` | `cli, serve, bootstrap, schedule, lane, paths, auth, net, scribe, service, antigravity_cmd, run`; `antigravity_cmd` → `auth, pool, quota, format, chat`; `run` → `host, stream, permission, status` |
+| `oc-antigravity` | `accounts, auth, config, constants, error, fingerprint, gateway, oauth, oauth_server, project, quota, rotation, schema, search, service, signature_cache, storage, stream, thinking, token, version`; `models` → `builtin, discovery, overlay`; `service` → `accounts, oauth, quotas, rotation, sync, token, types`; `gateway` → `pool, single, stream, validation`; `transform` → `request, gemini, claude, cross_model, model_resolver` |
+| `oc-tools` | `code_map` → `files, graph_ops, map, native_index, outline, parsers, precision, radar, ripwire, ripwire_mcp`; `code_map/native_index` → `index, parse, ops_map, ops_symbol, ops_graph, ops_affected, ops_deep, pack, quality`; `code_map/graph_ops` → `mcp, exec_query, exec_deep, exec_batch`; `code_map/ripwire_mcp` → `pool, daemon, wire`; `symbol_edit` → `file, resolve, native, ripwire` |
 
 Rules for future splits: move item bodies byte-identically; keep serde shapes,
 route tables, error tags and publish ordering untouched; keep `#[allow]`

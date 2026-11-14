@@ -97,6 +97,83 @@ pub(crate) enum Command {
         #[command(subcommand)]
         command: ServiceCommand,
     },
+    /// Authenticate providers and manage the Google Antigravity multi-account pool.
+    Auth(AuthArgs),
+}
+
+#[derive(Debug, clap::Args)]
+pub(crate) struct AuthArgs {
+    /// Working directory for project-local `.opencode/antigravity.json`.
+    #[arg(short = 'C', long, global = true)]
+    pub(crate) directory: Option<PathBuf>,
+    /// SQLite database path (default: `<data>/escape.db` or `$OPENCODE_DB`).
+    #[arg(long, env = "OPENCODE_DB", global = true)]
+    pub(crate) db: Option<PathBuf>,
+    /// Emit structured JSON output instead of formatted text.
+    #[arg(long, global = true)]
+    pub(crate) json: bool,
+    #[command(subcommand)]
+    pub(crate) command: AuthCommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub(crate) enum AuthCommand {
+    /// Sign in with Google Antigravity OAuth (multi-account) or store a provider API key.
+    Login {
+        /// Provider ID (`google`, `antigravity`, `openai`, `anthropic`, ...).
+        #[arg(short, long, default_value = "google")]
+        provider: String,
+        /// Disable the localhost loopback callback server and enter the callback URL/code manually.
+        #[arg(long)]
+        no_browser: bool,
+        /// Optional Google Cloud / Cloud Code Assist project ID override.
+        #[arg(long)]
+        project: Option<String>,
+        /// Optional human label for this credential/account (e.g. `Work`, `Personal`).
+        #[arg(short, long)]
+        label: Option<String>,
+        /// Optional authorization code or callback URL for manual completion.
+        #[arg(long)]
+        code: Option<String>,
+        /// Explicit API key when authenticating a non-OAuth provider.
+        #[arg(long, hide_env_values = true)]
+        api_key: Option<String>,
+    },
+    /// List stored credentials and Google Antigravity pool accounts.
+    #[command(visible_alias = "ls")]
+    List {
+        /// Filter output by provider ID.
+        #[arg(short, long)]
+        provider: Option<String>,
+    },
+    /// Show Google Antigravity account pool status, active cursors, and cooldowns.
+    Status {
+        /// Refresh live quotas and upstream models before printing status.
+        #[arg(long)]
+        refresh: bool,
+    },
+    /// Show remaining quota across Claude and Gemini model groups.
+    #[command(visible_alias = "quotas")]
+    Quota {
+        /// Read only locally cached quota snapshots instead of fetching upstream.
+        #[arg(long)]
+        cached: bool,
+    },
+    /// Set the active sticky Google Antigravity account by index, email, label, or token hash.
+    Use { account: String },
+    /// Re-enable a disabled or verification-flagged Google Antigravity account.
+    Enable { account: String },
+    /// Temporarily disable a Google Antigravity account from pool rotation.
+    Disable { account: String },
+    /// Remove a Google Antigravity account or stored `cred_` credential.
+    #[command(visible_alias = "rm")]
+    Remove { account: String },
+    /// List or refresh Google Antigravity models (`google/antigravity-*`).
+    Models {
+        /// Query upstream Cloud Code Assist to discover models and update the local cache.
+        #[arg(long)]
+        refresh: bool,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -177,6 +254,58 @@ mod tests {
             Command::Chat {
                 ask_permissions, ..
             } => assert!(ask_permissions),
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn auth_subcommands_parse_antigravity_flags() {
+        let login = Cli::try_parse_from([
+            "opencode",
+            "auth",
+            "login",
+            "--no-browser",
+            "--project",
+            "proj-1",
+            "--label",
+            "Work",
+        ])
+        .unwrap();
+        match login.command.unwrap() {
+            Command::Auth(args) => match args.command {
+                AuthCommand::Login {
+                    provider,
+                    no_browser,
+                    project,
+                    label,
+                    ..
+                } => {
+                    assert_eq!(provider, "google");
+                    assert!(no_browser);
+                    assert_eq!(project.as_deref(), Some("proj-1"));
+                    assert_eq!(label.as_deref(), Some("Work"));
+                }
+                other => panic!("unexpected auth subcommand: {other:?}"),
+            },
+            other => panic!("unexpected command: {other:?}"),
+        }
+
+        let quota =
+            Cli::try_parse_from(["opencode", "auth", "--json", "quota", "--cached"]).unwrap();
+        match quota.command.unwrap() {
+            Command::Auth(args) => {
+                assert!(args.json);
+                assert!(matches!(args.command, AuthCommand::Quota { cached: true }));
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+
+        let use_cmd = Cli::try_parse_from(["opencode", "auth", "use", "user@example.com"]).unwrap();
+        match use_cmd.command.unwrap() {
+            Command::Auth(args) => match args.command {
+                AuthCommand::Use { account } => assert_eq!(account, "user@example.com"),
+                other => panic!("unexpected auth subcommand: {other:?}"),
+            },
             other => panic!("unexpected command: {other:?}"),
         }
     }

@@ -30,6 +30,7 @@ import { SettingsGoals } from "./agentic/goals"
 import { SettingsObserver } from "./agentic/observer"
 import { SettingsSubagents } from "./agentic/subagents"
 import { SettingsLanes } from "./agentic/lanes"
+import { SettingsQuotas } from "./quotas/quotas"
 import { SettingsServerDataScope } from "./server-scope"
 import { SettingsNavigation, type SettingsNavGroup } from "./navigation"
 import { SettingsProjectGeneral } from "./workspaces/project"
@@ -50,6 +51,7 @@ const rootClientTabs = [
 
 const serverTabs = [
   { value: "providers", icon: pageIcons.providers, label: "settings.providers.title" },
+  { value: "quotas", icon: pageIcons.quotas, label: "settings.tab.quotas" },
   { value: "models", icon: pageIcons.models, label: "settings.models.title" },
   { value: "extensions", icon: pageIcons.extensions, label: "settings.tab.extensions" },
   { value: "memory", icon: pageIcons.memory, label: "settings.tab.memory" },
@@ -64,6 +66,7 @@ const serverTabs = [
 // The heading of each per-server page, which its unreachable state keeps.
 const serverPages = {
   providers: { title: "settings.providers.title", description: "settings.providers.description" },
+  quotas: { title: "settings.tab.quotas", description: "settings.quotas.description" },
   models: { title: "settings.models.title", description: "settings.models.description" },
   extensions: { title: "settings.tab.extensions", description: "settings.extensions.description" },
   memory: { title: "settings.tab.memory", description: "settings.memory.description" },
@@ -422,6 +425,9 @@ function RootSettings() {
             </Tabs.Content>
             <Tabs.Content value="lanes" class="settings-panel">
               <SettingsLanes />
+            </Tabs.Content>
+            <Tabs.Content value="quotas" class="settings-panel">
+              <SettingsQuotas />
             </Tabs.Content>
           </SettingsServerDataScope>
         )}

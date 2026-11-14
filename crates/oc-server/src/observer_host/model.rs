@@ -53,8 +53,14 @@ async fn stored_credential_key(store: &Store, provider: &str) -> Option<String> 
             continue;
         };
         let key = match value.get("type").and_then(Value::as_str) {
-            Some("oauth") => value.get("access_token").or_else(|| value.get("key")),
-            _ => value.get("key").or_else(|| value.get("access_token")),
+            Some("oauth") => value
+                .get("access")
+                .or_else(|| value.get("access_token"))
+                .or_else(|| value.get("key")),
+            _ => value
+                .get("key")
+                .or_else(|| value.get("access"))
+                .or_else(|| value.get("access_token")),
         }
         .and_then(Value::as_str)
         .filter(|key| !key.is_empty());

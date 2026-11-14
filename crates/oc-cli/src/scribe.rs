@@ -118,7 +118,10 @@ pub fn attach(
     store: Arc<Store>,
 ) -> Option<LlmScribe> {
     let reference = digest_reference(config)?;
-    let model = match catalog.resolve(&reference) {
+    // Resolve through the shared client, not the startup snapshot alone: a
+    // transport hook (Antigravity) knows models discovered after the snapshot,
+    // and an Antigravity-only digest model must still attach the scribe.
+    let model = match client.resolve_model(catalog, &reference) {
         Ok(model) => model,
         Err(error) => {
             tracing::warn!(
@@ -198,8 +201,14 @@ async fn stored_credential_key(store: &Store, provider: &str) -> Option<String> 
             continue;
         };
         let key = match value.get("type").and_then(Value::as_str) {
-            Some("oauth") => value.get("access_token").or_else(|| value.get("key")),
-            _ => value.get("key").or_else(|| value.get("access_token")),
+            Some("oauth") => value
+                .get("access")
+                .or_else(|| value.get("access_token"))
+                .or_else(|| value.get("key")),
+            _ => value
+                .get("key")
+                .or_else(|| value.get("access"))
+                .or_else(|| value.get("access_token")),
         }
         .and_then(Value::as_str)
         .filter(|key| !key.is_empty());
@@ -307,10 +316,19 @@ mod tests {
         )
     }
 
+    /// Resolution goes through the shared client (the same path `attach`
+    /// takes), so these tests also cover hook-provided models.
     fn resolved_reference(config: &ConfigService) -> Option<String> {
+        let client = SharedLlmClient::new(oc_llm::LlmClient::new().expect("client"));
+        resolved_reference_with(&client, config)
+    }
+
+    fn resolved_reference_with(client: &SharedLlmClient, config: &ConfigService) -> Option<String> {
         let catalog = Catalog::from_snapshot(CATALOG).expect("catalog");
         let reference = digest_reference(config)?;
-        let model = catalog.resolve(&reference).expect("model resolves");
+        let model = client
+            .resolve_model(&catalog, &reference)
+            .expect("model resolves");
         Some(model.reference)
     }
 
@@ -381,6 +399,68 @@ mod tests {
             oc_llm::LlmClient::new().expect("client"),
         ));
         assert!(attach(&config, &catalog, client, store).is_none());
+    }
+
+    /// Transport hook that knows one model the startup snapshot does not, the
+    /// same shape as the Antigravity hook resolving discovered models.
+    #[derive(Debug)]
+    struct LateModelHook {
+        catalog: Catalog,
+    }
+
+    impl oc_llm::LlmTransportHook for LateModelHook {
+        fn handles(&self, _request: &LlmRequest) -> bool {
+            false
+        }
+
+        fn stream(&self, _request: LlmRequest) -> oc_llm::HookStreamFuture {
+            Box::pin(async {
+                Err(oc_llm::LlmError::Config {
+                    message: "unused in this test".to_owned(),
+                })
+            })
+        }
+
+        fn resolve_model(&self, _catalog: &Catalog, reference: &str) -> Option<ResolvedModel> {
+            self.catalog.resolve(reference).ok()
+        }
+    }
+
+    fn catalog_with_gamma() -> Catalog {
+        let mut snapshot: Value = serde_json::from_str(CATALOG).expect("catalog json");
+        let models = snapshot["test"]["models"]
+            .as_object_mut()
+            .expect("models object");
+        let mut gamma = models["alpha"].clone();
+        gamma["id"] = json!("gamma");
+        gamma["name"] = json!("Gamma");
+        models.insert("gamma".to_owned(), gamma);
+        Catalog::from_snapshot(&snapshot.to_string()).expect("catalog")
+    }
+
+    #[tokio::test]
+    async fn hook_discovered_digest_model_attaches_the_scribe() {
+        let root = TempDir::new().expect("tempdir");
+        let config = config_at(
+            root.path(),
+            r#"{"subagents": {"digest_model": "test/gamma"}}"#,
+        );
+        let store = store_at(root.path()).await;
+        let catalog = Catalog::from_snapshot(CATALOG).expect("catalog");
+        let client = Arc::new(SharedLlmClient::new(
+            oc_llm::LlmClient::new().expect("client"),
+        ));
+
+        // Without the hook the model is unknown, so the scribe stays disabled...
+        assert!(attach(&config, &catalog, Arc::clone(&client), Arc::clone(&store)).is_none());
+
+        // ...and once the hook can resolve it (as the Antigravity hook does for
+        // models discovered after startup) the scribe attaches.
+        client.set_hook(Some(Arc::new(LateModelHook {
+            catalog: catalog_with_gamma(),
+        })));
+        let scribe = attach(&config, &catalog, client, store).expect("scribe attaches");
+        assert_eq!(scribe.model.reference, "test/gamma");
     }
 
     /// OpenAI-compatible SSE server that records the `Authorization` header and

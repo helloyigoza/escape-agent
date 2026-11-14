@@ -78,10 +78,37 @@ impl<T> Default for Ordered<T> {
 }
 
 /// Catalog of providers and models with a reference index.
-#[derive(Debug)]
+#[derive(Debug, Clone, Default)]
 pub struct Catalog {
     providers: Vec<ProviderInfo>,
     models: Vec<ModelInfo>,
     provider_index: HashMap<String, usize>,
     model_index: HashMap<(String, String), usize>,
+}
+
+impl Catalog {
+    /// Insert or replace a provider definition while preserving index lookups.
+    pub fn upsert_provider(&mut self, provider: ProviderInfo) {
+        if let Some(&index) = self.provider_index.get(&provider.id) {
+            self.providers[index] = provider;
+        } else {
+            let index = self.providers.len();
+            self.provider_index.insert(provider.id.clone(), index);
+            self.providers.push(provider);
+        }
+    }
+
+    /// Insert or replace models for `provider_id`, keeping lookup indices synced.
+    pub fn upsert_provider_models(&mut self, models: Vec<ModelInfo>) {
+        for model in models {
+            let key = (model.provider_id.clone(), model.id.clone());
+            if let Some(&index) = self.model_index.get(&key) {
+                self.models[index] = model;
+            } else {
+                let index = self.models.len();
+                self.model_index.insert(key, index);
+                self.models.push(model);
+            }
+        }
+    }
 }

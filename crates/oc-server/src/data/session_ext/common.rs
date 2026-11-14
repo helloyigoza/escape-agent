@@ -28,7 +28,7 @@ pub(super) async fn require_session(
 }
 
 /// Reads every message of a session in ascending `seq` order.
-pub(super) async fn messages_all(
+pub(crate) async fn messages_all(
     store: &Store,
     session_id: &str,
 ) -> Result<Vec<Value>, StoreError> {
@@ -54,7 +54,7 @@ pub(super) async fn messages_all(
 }
 
 /// Reads every session, optionally filtered by project.
-pub(super) async fn sessions_all(
+pub(crate) async fn sessions_all(
     store: &Store,
     project: Option<&str>,
 ) -> Result<Vec<Value>, StoreError> {
@@ -114,11 +114,11 @@ pub(super) fn json_i64(value: &Value) -> Option<i64> {
     })
 }
 
-pub(super) fn time_of(value: &Value) -> Option<i64> {
+pub(crate) fn time_of(value: &Value) -> Option<i64> {
     value.pointer("/time/created").and_then(json_i64)
 }
 
-pub(super) fn id_of(value: &Value) -> String {
+pub(crate) fn id_of(value: &Value) -> String {
     value
         .get("id")
         .and_then(Value::as_str)

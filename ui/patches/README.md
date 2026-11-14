@@ -29,6 +29,13 @@ contains them, and `build.sh`/`build.ps1` do not apply them.
   of the denominator is the hard limit, not the point where compaction fires.
   Compaction triggers below the ceiling by the buffer: `ceiling − buffer`, where an
   unset (or `0`) `compaction.buffer` means `max(8_000, window/10)`.
+- `0008-settings-quotas.patch` — the `quotas` settings page: the per-server tab
+  (`settings/route.ts`, `pages.ts`, `shell.tsx`, `search-catalog.ts`,
+  `route.test.ts`), the new `settings/quotas/` directory (`api.ts` with the typed
+  `/api/quotas` client, formatters and the status vocabulary, `quotas.tsx`,
+  `quotas.css`, `api.test.ts`), the provider quota section in the Usage dialog,
+  and the `en`/`tr` strings. The dialog reads the cached query only
+  (`enabled: () => false`); the settings tab is the only poller (60 s).
 
 Rules:
 
@@ -44,3 +51,18 @@ Regenerating 0002:
 2. `diff -ruN a b > 0002-session-agent-panels.patch` with both roots holding
    `packages/app/src/...`, so hunk paths carry the `a/` and `b/` prefixes.
 3. `git apply --check -p1` on a tree that already has 0001.
+
+Regenerating 0008 (`diff -ruN a b` against a pristine tree, new files included):
+
+```sh
+# a/ = HEAD, b/ = the edited working tree; both rooted at packages/app/src.
+tmp=$(mktemp -d)
+mkdir -p "$tmp/a/packages/app" "$tmp/b/packages/app"
+git archive HEAD ui/vendor/opencode/packages/app/src | tar -x -C "$tmp/a/packages/app" --strip-components=5
+cp -a ui/vendor/opencode/packages/app/src/. "$tmp/b/packages/app/src/"
+cd "$tmp" && diff -ruN a b > 0008-settings-quotas.patch
+# prove it on a pristine tree, never by reverting the working copy:
+clean=$(mktemp -d) && git archive HEAD ui/vendor/opencode | tar -x -C "$clean"
+cd "$clean/ui/vendor/opencode" && git apply --check -p1 /path/to/0008-settings-quotas.patch
+```
+

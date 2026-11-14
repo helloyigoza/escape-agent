@@ -19,6 +19,7 @@ http.workspace = true
 ignore.workspace = true
 jsonc-parser.workspace = true
 mime_guess.workspace = true
+oc-antigravity.workspace = true
 oc-config.workspace = true
 oc-lanes = { path = "../oc-lanes" }
 oc-llm.workspace = true

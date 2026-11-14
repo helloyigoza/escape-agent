@@ -20,13 +20,17 @@ pub struct ExportParams {
     sanitize: Option<String>,
 }
 
-const SECRET_KEYS: [&str; 13] = [
+pub const SECRET_KEYS: [&str; 19] = [
     "authorization",
     "apikey",
     "api_key",
     "api-key",
+    "x-api-key",
+    "bearer",
     "token",
+    "access",
     "access_token",
+    "refresh",
     "refresh_token",
     "secret",
     "client_secret",
@@ -34,6 +38,8 @@ const SECRET_KEYS: [&str; 13] = [
     "credential",
     "credentials",
     "private_key",
+    "managementkey",
+    "management_key",
 ];
 
 fn is_secret_key(key: &str) -> bool {

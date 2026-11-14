@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 use std::time::Duration;
 
 use oc_config::ConfigService;
-use oc_llm::Catalog;
+use oc_llm::{Catalog, ModelInfo, SharedLlmClient};
 use oc_subagents::{Limits, ModelDefaults, Role};
 use oc_tools::ToolError;
 use oc_types::ModelRef;
@@ -231,9 +231,24 @@ pub(super) fn available_agents(config: &ConfigService) -> Vec<String> {
         .collect()
 }
 
-pub(super) fn available_models(catalog: &Catalog) -> Vec<String> {
+pub(super) fn available_models(catalog: &Catalog, client: &SharedLlmClient) -> Vec<String> {
+    let mut all_models = catalog.models();
+    for extra in client.dynamic_models() {
+        if let Some(pos) = all_models
+            .iter()
+            .position(|m| m.provider_id == extra.provider_id && m.id == extra.id)
+        {
+            all_models[pos] = extra;
+        } else {
+            all_models.push(extra);
+        }
+    }
+    available_models_from_slice(&all_models)
+}
+
+fn available_models_from_slice(source: &[ModelInfo]) -> Vec<String> {
     let mut models = Vec::new();
-    for model in catalog.models() {
+    for model in source {
         let chat = model.kind.as_deref().is_none_or(|kind| kind == "chat");
         if !chat || !model.enabled {
             continue;
@@ -286,9 +301,13 @@ pub(super) fn requested_role(input: &Value, settings: &SubagentSettings, agent: 
         })
 }
 
-pub(super) fn model_value(reference: &str, catalog: &Catalog) -> Result<Value, ToolError> {
-    let resolved = catalog
-        .resolve(reference)
+pub(super) fn model_value(
+    reference: &str,
+    catalog: &Catalog,
+    client: &SharedLlmClient,
+) -> Result<Value, ToolError> {
+    let resolved = client
+        .resolve_model(catalog, reference)
         .map_err(|error| json_error(&error))?;
     let model_ref = ModelRef {
         id: resolved.model.model_id.clone(),

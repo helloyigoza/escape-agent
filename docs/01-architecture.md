@@ -44,6 +44,7 @@ Sidecars (each optional, each with its own lifecycle and RAM budget):
 | `oc-store` | SQLite schema, migrations, repositories, event log, inbox | runtime/server |
 | `oc-config` | Discovery, merge/precedence, permissions, credentials | runtime/server |
 | `oc-llm` | Provider registry, models.dev catalog, streaming, retries, token estimate | tools/store |
+| `oc-antigravity` | Antigravity Google OAuth, multi-account pool, Cloud Code Assist gateway, transforms, quota & grounding search | runtime internals/server |
 | `oc-runtime` | Session actors, turn loop, prompt assembly, compaction, instructions | server/UI |
 | `oc-tools` | Tool registry, built-ins, lanes, subagent/session/memory/goal tools | server |
 | `oc-observer` | Expectation registry, observer actor, goal judge, repair executor | server |
